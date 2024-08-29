@@ -32,8 +32,12 @@ import {VRFV2PlusClient} from "@chainlink/contracts/src/v0.8/vrf/dev/libraries/V
 contract Raffle is VRFConsumerBaseV2Plus {
     /* errors */
     error Raffle__NotEnoughETHSent();
-    error Raffle__NotEnoughTimePassed();
     error Raffle__TransferFailed();
+    error Raffle__upkeepNotNeeded(
+        uint256 balance,
+        uint256 playersLength,
+        uint256 raffleState
+    );
 
     /* Type declarations */
     enum RaffleState {
@@ -77,6 +81,8 @@ contract Raffle is VRFConsumerBaseV2Plus {
         s_raffleState = RaffleState.OPEN;
     }
 
+    // 1. Get a random number
+    // 2. Use a random number to pick a player
     function enterRaffle() external payable {
         // require(msg.value >= i_EntranceFee, "Not Enough ETH Sent");  // Not very Gas Efficient Because we are storing the string onto the memory
         // require(msg.value >= i_EntranceFee, Raffle__NotEnoughETHSent());  Can be used in newer versions of solidity when compiled with via-ir compiler
@@ -91,14 +97,58 @@ contract Raffle is VRFConsumerBaseV2Plus {
         emit RaffleEntered(msg.sender);
     }
 
-    // Get a random number
-    // Use a random number to pick a player
-    // Be automatically called
+    // When should the winner be picked ?
+    /**
+     * @dev This is the function that the Chainlink nodes will call to see
+     *      if the lottery is ready to have a winner picked.
+     *      THe following should be true in order for the upkeepNeeded to be TRUE:
+     *      1. The time interval has passed between the raffle runs
+     *      2. The lottery is OPEN
+     *      3. The contract has ETH
+     *      4. Implicitly, your subscription has LINK
+     * @param - ignored
+     * @return upkeepNeeded - TRUE if it's time to restart the lottery
+     * @return - ignored
+     */
+    function checkUpkeep(
+        bytes memory /* checkData */
+    )
+        public
+        view
+        returns (
+            /* override */
+            bool upkeepNeeded,
+            bytes memory /* performData */
+        )
+    // A way to initialize variables in the return statement -> bool upkeepNeeded is initialized = false
+    {
+        bool timeHasPassed = ((block.timestamp - s_LastTimeStamp) >=
+            i_Interval);
+        bool isOpen = (s_raffleState == RaffleState.OPEN);
+        bool hasBalance = address(this).balance > 0;
+        bool hasPlayers = s_Players.length > 0;
 
-    function pickWinner() external {
+        upkeepNeeded = (timeHasPassed && isOpen && hasBalance && hasPlayers);
+
+        return (upkeepNeeded, "");
+    }
+
+    // 3. Be automatically called
+    function performUpkeep(
+        bytes calldata /* performData */ /*override*/
+    ) external {
         // Check to see if enough time has passed
-        if ((block.timestamp - s_LastTimeStamp) < i_Interval) {
-            revert Raffle__NotEnoughTimePassed();
+        // if ((block.timestamp - s_LastTimeStamp) < i_Interval) {
+        //     revert Raffle__NotEnoughTimePassed();
+        // }
+
+        (bool upkeepNeeded, ) = checkUpkeep("");
+        if (!upkeepNeeded) {
+            revert Raffle__upkeepNotNeeded(
+                address(this).balance,
+                s_Players.length,
+                uint256(s_raffleState)
+            );
         }
 
         s_raffleState = RaffleState.CALCULATING;
@@ -118,10 +168,14 @@ contract Raffle is VRFConsumerBaseV2Plus {
         uint256 requestId = s_vrfCoordinator.requestRandomWords(request);
     }
 
+    // CEI: Checks, Effects, Interactions Pattern
     function fulfillRandomWords(
         uint256 requestId,
         uint256[] calldata randomWords
     ) internal virtual override {
+        // Checks
+
+        // Effect (Internal Contract State Changes)
         uint256 IndexOfWinner = randomWords[0] % s_Players.length;
         address payable recentWinner = s_Players[IndexOfWinner];
 
@@ -130,11 +184,13 @@ contract Raffle is VRFConsumerBaseV2Plus {
         s_Players = new address payable[](0);
         s_LastTimeStamp = block.timestamp;
 
+        emit WinnerPicked(s_recentWinner);
+
+        // Interactions (External Contract Interactions)
         (bool success, ) = recentWinner.call{value: address(this).balance}("");
         if (!success) {
             revert Raffle__TransferFailed();
         }
-        emit WinnerPicked(s_recentWinner);
     }
 
     /* Getter Functions */
